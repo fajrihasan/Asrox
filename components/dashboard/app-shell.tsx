@@ -3,7 +3,6 @@
 import {
   Bell,
   Check,
-  CheckCheck,
   ChevronDown,
   LogOut,
   MessageCircle,
@@ -16,16 +15,41 @@ import {
   UsersRound,
   X,
 } from "lucide-react";
-import { useRouter } from "next/navigation";
-import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useState, type FormEvent } from "react";
+import {
+  loadFriendshipsAction,
+  respondFriendRequestAction,
+  sendFriendRequestAction,
+  type FriendRequest,
+} from "@/app/actions/friendships";
+import {
+  addConversationParticipantsAction,
+  createGroupAction,
+  editMessageAction,
+  loadConversationsAction,
+  openDirectConversationAction,
+  searchUsersAction,
+  sendMessageAction,
+} from "@/app/actions/messaging";
+import { logoutAction } from "@/app/actions/auth";
 import { BrandMark } from "@/components/brand-mark";
 import { ChatList } from "@/components/dashboard/chat-list";
 import { ConversationView } from "@/components/dashboard/conversation-view";
 import { InfoPanel } from "@/components/dashboard/info-panel";
 import { Avatar } from "@/components/ui/avatar";
-import { conversations as initialConversations, currentUser, friends as initialFriends, incomingRequests as initialRequests } from "@/lib/mock-data";
+import { createClient } from "@/lib/supabase/client";
 import type { AppSection, ChatConversation, ChatMessage, Person, ThemeMode } from "@/lib/chat-types";
 import { useThemePreference } from "@/lib/theme-store";
+
+type ActivityNotification = {
+  id: string;
+  title: string;
+  text: string;
+  createdAt: string;
+  initials: string;
+  color: string;
+  unread: boolean;
+};
 
 const navigation: { id: AppSection; label: string; icon: typeof MessageCircle }[] = [
   { id: "chats", label: "Pesan", icon: MessageCircle },
@@ -34,13 +58,39 @@ const navigation: { id: AppSection; label: string; icon: typeof MessageCircle }[
   { id: "notifications", label: "Notifikasi", icon: Bell },
 ];
 
-export function AppShell() {
-  const router = useRouter();
+export function AppShell({
+  userId,
+  initialConversations,
+  displayName,
+  username,
+  avatarUrl,
+}: {
+  userId: string;
+  initialConversations: ChatConversation[];
+  displayName: string;
+  username: string;
+  avatarUrl: string | null;
+}) {
+  const signedInUser = {
+    id: userId,
+    name: displayName,
+    username,
+    avatar: avatarUrl ?? "",
+    bio: "",
+    online: true,
+  };
   const [chats, setChats] = useState(initialConversations);
-  const [people, setPeople] = useState<Person[]>(initialFriends);
-  const [requests, setRequests] = useState<Person[]>(initialRequests);
+  const [people, setPeople] = useState<Person[]>([]);
+  const [requests, setRequests] = useState<FriendRequest[]>([]);
+  const [outgoingRequests, setOutgoingRequests] = useState<FriendRequest[]>([]);
+  const [requestTab, setRequestTab] = useState<"incoming" | "outgoing">("incoming");
+  const [friendshipsLoading, setFriendshipsLoading] = useState(true);
   const [section, setSection] = useState<AppSection>("chats");
-  const [selectedId, setSelectedId] = useState<string | null>("nara");
+  const [selectedId, setSelectedId] = useState<string | null>(initialConversations[0]?.id ?? null);
+  const [searchResults, setSearchResults] = useState<Person[]>([]);
+  const [searchResultsQuery, setSearchResultsQuery] = useState("");
+  const [searchingUsers, setSearchingUsers] = useState(false);
+  const [loadedConversationId, setLoadedConversationId] = useState<string | null>(null);
   const [detailsOpen, setDetailsOpen] = useState(true);
   const [mobileDetailsOpen, setMobileDetailsOpen] = useState(false);
   const [theme, setTheme] = useThemePreference();
@@ -49,24 +99,33 @@ export function AppShell() {
   const [peopleQuery, setPeopleQuery] = useState("");
   const [groupName, setGroupName] = useState("");
   const [groupMembers, setGroupMembers] = useState<string[]>([]);
-  const [groupAvatar, setGroupAvatar] = useState("");
   const [profileEdit, setProfileEdit] = useState(false);
-  const [profileName, setProfileName] = useState(currentUser.name);
-  const [profileUsername, setProfileUsername] = useState(currentUser.username);
-  const [profileBio, setProfileBio] = useState(currentUser.bio ?? "");
-  const [notificationsRead, setNotificationsRead] = useState(false);
+  const [profileName, setProfileName] = useState(signedInUser.name);
+  const [profileUsername, setProfileUsername] = useState(signedInUser.username);
+  const [profileBio, setProfileBio] = useState(signedInUser.bio);
+  const [notifications, setNotifications] = useState<ActivityNotification[]>([]);
   const [profilePreview, setProfilePreview] = useState<Person | null>(null);
 
   const selectedChat = chats.find((chat) => chat.id === selectedId) ?? null;
-  const searchedPeople = useMemo(() => {
-    const query = peopleQuery.trim().toLocaleLowerCase().replace(/^@/, "");
-    if (!query) return [...people, ...requests];
-    return [...people, ...requests].filter(
-      (person) =>
-        person.name.toLocaleLowerCase().includes(query) ||
-        person.username.toLocaleLowerCase().includes(query),
-    );
-  }, [people, peopleQuery, requests]);
+  const currentSearchResults =
+    peopleQuery.trim().replace(/^@/, "").toLowerCase() === searchResultsQuery
+      ? searchResults
+      : [];
+
+  const refreshFriendships = useCallback(async () => {
+    const result = await loadFriendshipsAction();
+    if (!result.ok) {
+      setToast(result.error);
+      setFriendshipsLoading(false);
+      return null;
+    }
+
+    setPeople(result.data.friends);
+    setRequests(result.data.incomingRequests);
+    setOutgoingRequests(result.data.outgoingRequests);
+    setFriendshipsLoading(false);
+    return result.data;
+  }, []);
 
   useEffect(() => {
     const preference = window.matchMedia("(prefers-color-scheme: light)");
@@ -82,33 +141,287 @@ export function AppShell() {
     }
   }, [theme]);
 
+  useEffect(() => {
+    const query = peopleQuery.trim().replace(/^@/, "");
+    if (modal !== "new-chat" && modal !== "group" && modal !== "add-members") return;
+    if (query.length < 2) return;
+
+    let cancelled = false;
+    const timeout = window.setTimeout(async () => {
+      setSearchingUsers(true);
+      const result = await searchUsersAction(query);
+      if (cancelled) return;
+      setSearchingUsers(false);
+      if (!result.ok) {
+        setSearchResults([]);
+        setSearchResultsQuery(query.toLowerCase());
+        setToast(result.error);
+        return;
+      }
+      setSearchResults(result.data);
+      setSearchResultsQuery(query.toLowerCase());
+    }, 250);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timeout);
+    };
+  }, [modal, peopleQuery]);
+
+  useEffect(() => {
+    if (!selectedId) return;
+
+    let cancelled = false;
+    const supabase = createClient();
+
+    async function loadMessages() {
+      const { data, error } = await supabase
+        .from("messages")
+        .select(
+          "id, content, sender_id, created_at, deleted_at, profiles:profiles!messages_sender_id_fkey(full_name, username), message_reads(user_id, read_at)",
+        )
+        .eq("conversation_id", selectedId!)
+        .order("created_at", { ascending: false })
+        .limit(100);
+
+      if (cancelled) return;
+      setLoadedConversationId(selectedId!);
+      if (error) {
+        setToast("Riwayat pesan belum dapat dimuat.");
+        return;
+      }
+
+      const messages: ChatMessage[] = [...data].reverse().map((message) => ({
+        id: message.id,
+        author: message.profiles?.full_name ?? message.profiles?.username ?? "Pengguna",
+        text: message.deleted_at ? "Pesan dihapus" : message.content,
+        time: new Intl.DateTimeFormat("id-ID", {
+          hour: "2-digit",
+          minute: "2-digit",
+        }).format(new Date(message.created_at)),
+        mine: message.sender_id === userId,
+        read: message.message_reads.some((receipt) => receipt.user_id !== userId),
+      }));
+
+      setChats((current) =>
+        current.map((chat) => chat.id === selectedId ? { ...chat, messages } : chat),
+      );
+    }
+
+    void loadMessages();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedId, userId]);
+
+  useEffect(() => {
+    const supabase = createClient();
+    const channel = supabase
+      .channel(`user-messages:${userId}`)
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "messages" },
+        async (payload) => {
+          const row = payload.eventType === "DELETE" ? payload.old : payload.new;
+          const conversationId =
+            typeof row.conversation_id === "string" ? row.conversation_id : null;
+
+          if (
+            payload.eventType === "INSERT" &&
+            row.sender_id !== userId &&
+            typeof row.id === "string"
+          ) {
+            setNotifications((current) => [
+              {
+                id: `message:${row.id}`,
+                title: "Pesan baru",
+                text: typeof row.content === "string" ? row.content : "Kamu menerima pesan baru.",
+                createdAt: typeof row.created_at === "string" ? row.created_at : new Date().toISOString(),
+                initials: "P",
+                color: "lavender",
+                unread: true,
+              },
+              ...current.filter((item) => item.id !== `message:${row.id}`),
+            ].slice(0, 30));
+          }
+
+          if (selectedId && conversationId === selectedId) {
+            const { data, error } = await supabase
+              .from("messages")
+              .select(
+                "id, content, sender_id, created_at, deleted_at, profiles:profiles!messages_sender_id_fkey(full_name, username), message_reads(user_id, read_at)",
+              )
+              .eq("conversation_id", selectedId)
+              .order("created_at", { ascending: false })
+              .limit(100);
+
+            if (error) {
+              setToast("Pesan terbaru belum dapat dimuat.");
+            } else {
+              const messages: ChatMessage[] = [...data].reverse().map((message) => ({
+                id: message.id,
+                author: message.profiles?.full_name ?? message.profiles?.username ?? "Pengguna",
+                text: message.deleted_at ? "Pesan dihapus" : message.content,
+                time: new Intl.DateTimeFormat("id-ID", {
+                  hour: "2-digit",
+                  minute: "2-digit",
+                }).format(new Date(message.created_at)),
+                mine: message.sender_id === userId,
+                read: message.message_reads.some((receipt) => receipt.user_id !== userId),
+              }));
+
+              setChats((current) =>
+                current.map((chat) => chat.id === selectedId ? { ...chat, messages } : chat),
+              );
+            }
+          }
+
+          const result = await loadConversationsAction();
+          if (!result.ok) {
+            setToast(result.error);
+          } else {
+            setChats((current) =>
+              result.data.map((chat) => ({
+                ...chat,
+                messages: current.find((item) => item.id === chat.id)?.messages ?? [],
+              })),
+            );
+          }
+        },
+      )
+      .subscribe((status) => {
+        if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
+          setToast("Koneksi pesan realtime terputus. Memuat ulang halaman dapat membantu.");
+        }
+      });
+
+    return () => {
+      void supabase.removeChannel(channel);
+    };
+  }, [selectedId, userId]);
+
+  useEffect(() => {
+    let active = true;
+    const supabase = createClient();
+
+    const refresh = async () => {
+      const snapshot = await refreshFriendships();
+      if (!active || !snapshot) return;
+    };
+
+    void refresh();
+    const channel = supabase
+      .channel(`user-friendships:${userId}`)
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "friendships" },
+        async (payload) => {
+          const row = payload.eventType === "DELETE" ? payload.old : payload.new;
+          const snapshot = await refreshFriendships();
+          if (!active || !snapshot || typeof row.id !== "string") return;
+
+          let person: Person | undefined;
+          let title = "";
+          let text = "";
+
+          if (payload.eventType === "INSERT" && row.addressee_id === userId) {
+            person = snapshot.incomingRequests.find(
+              (request) => request.friendshipId === row.id,
+            )?.person;
+            title = "Permintaan pertemanan baru";
+            text = person ? `${person.name} ingin terhubung denganmu.` : "Kamu menerima permintaan pertemanan.";
+          } else if (payload.eventType === "UPDATE" && row.status === "accepted") {
+            person = snapshot.friends.find((friend) =>
+              friend.id === (row.requester_id === userId ? row.addressee_id : row.requester_id),
+            );
+            title = "Permintaan pertemanan diterima";
+            text = person ? `Kamu dan ${person.name} kini berteman.` : "Permintaan pertemananmu diterima.";
+          }
+
+          if (title) {
+            setNotifications((current) => [
+              {
+                id: `friendship:${row.id}:${row.status}`,
+                title,
+                text,
+                createdAt: typeof row.updated_at === "string" ? row.updated_at : new Date().toISOString(),
+                initials: person?.name.slice(0, 1).toUpperCase() ?? "K",
+                color: "mint",
+                unread: true,
+              },
+              ...current,
+            ].slice(0, 30));
+          }
+        },
+      )
+      .subscribe((status) => {
+        if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
+          setToast("Pembaruan pertemanan realtime belum tersedia.");
+        }
+      });
+
+    return () => {
+      active = false;
+      void supabase.removeChannel(channel);
+    };
+  }, [refreshFriendships, userId]);
+
   function showToast(message: string) {
     setToast(message);
     window.setTimeout(() => setToast(""), 2800);
   }
 
-  function updateChatMessages(chatId: string, update: (messages: ChatMessage[]) => ChatMessage[]) {
-    setChats((current) =>
-      current.map((chat) => (chat.id === chatId ? { ...chat, messages: update(chat.messages) } : chat)),
-    );
+  async function signOut() {
+    const result = await logoutAction();
+    if (result.error) showToast(result.error);
   }
 
-  function sendMessage(text: string) {
-    if (!selectedChat) return;
-    const newMessage: ChatMessage = {
-      id: `message-${Date.now()}`,
-      author: "Kamu",
-      text,
-      time: new Intl.DateTimeFormat("id-ID", { hour: "2-digit", minute: "2-digit" }).format(new Date()),
-      mine: true,
-      read: false,
-    };
-    updateChatMessages(selectedChat.id, (messages) => [...messages, newMessage]);
+  async function sendMessage(text: string): Promise<boolean> {
+    if (!selectedChat) return false;
+    const result = await sendMessageAction(selectedChat.id, text);
+    if (!result.ok) {
+      showToast(result.error);
+      return false;
+    }
+
     setChats((current) =>
       current.map((chat) =>
-        chat.id === selectedChat.id ? { ...chat, preview: text, time: "Baru saja" } : chat,
+        chat.id === selectedChat.id
+          ? {
+              ...chat,
+              preview: chat.kind === "group" ? `Kamu: ${result.data.text}` : result.data.text,
+              time: result.data.time,
+              messages: chat.messages.some((message) => message.id === result.data.id)
+                ? chat.messages
+                : [...chat.messages, result.data],
+            }
+          : chat,
       ),
     );
+    return true;
+  }
+
+  async function editMessage(messageId: string, text: string): Promise<boolean> {
+    const result = await editMessageAction(messageId, text);
+    if (!result.ok) {
+      showToast(result.error);
+      return false;
+    }
+
+    if (!selectedChat) return false;
+    setChats((current) =>
+      current.map((chat) =>
+        chat.id === selectedChat.id
+          ? {
+              ...chat,
+              messages: chat.messages.map((message) =>
+                message.id === result.data.id ? result.data : message,
+              ),
+            }
+          : chat,
+      ),
+    );
+    return true;
   }
 
   function selectChat(id: string) {
@@ -134,99 +447,114 @@ export function AppShell() {
     }
   }
 
-  function createGroup(event: FormEvent<HTMLFormElement>) {
+  async function createGroup(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const name = groupName.trim();
     if (!name) return;
-    const created: ChatConversation = {
-      id: `group-${Date.now()}`,
-      kind: "group",
-      name,
-      avatar: groupAvatar,
-      preview: "Grup dibuat. Mulai percakapan.",
-      time: "Baru saja",
-      unread: 0,
-      members: groupMembers.length + 1,
-      currentUserRole: "owner",
-      bio: "Grup baru untuk obrolan terbaikmu.",
-      messages: [],
-    };
-    setChats((current) => [created, ...current]);
-    setSelectedId(created.id);
+    const result = await createGroupAction(name, groupMembers);
+    if (!result.ok) {
+      showToast(result.error);
+      return;
+    }
+
+    const conversations = await loadConversationsAction();
+    if (!conversations.ok) {
+      showToast(conversations.error);
+      return;
+    }
+    setChats(conversations.data);
+    setSelectedId(result.data);
     setSection("chats");
     setModal(null);
     setGroupName("");
     setGroupMembers([]);
-    setGroupAvatar("");
     showToast("Grup berhasil dibuat.");
   }
 
-  function addMembersToChat(event: FormEvent<HTMLFormElement>) {
+  async function addMembersToChat(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!selectedChat || selectedChat.kind !== "group" || groupMembers.length === 0) return;
-    setChats((current) => current.map((chat) => chat.id === selectedChat.id
-      ? { ...chat, members: (chat.members ?? 1) + groupMembers.length }
-      : chat));
+    const result = await addConversationParticipantsAction(selectedChat.id, groupMembers);
+    if (!result.ok) {
+      showToast(result.error);
+      return;
+    }
+    const conversations = await loadConversationsAction();
+    if (!conversations.ok) {
+      showToast(conversations.error);
+      return;
+    }
+    setChats(conversations.data);
     setModal(null);
-    showToast(`${groupMembers.length} teman ditambahkan ke grup.`);
+    showToast("Anggota grup berhasil ditambahkan.");
     setGroupMembers([]);
   }
 
   function openGroupEditor() {
     if (!selectedChat || selectedChat.kind !== "group") return;
     setGroupName(selectedChat.name);
-    setGroupAvatar(selectedChat.avatar);
     setModal("edit-group");
   }
 
   function saveGroupEdits(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!selectedChat || selectedChat.kind !== "group" || !groupName.trim()) return;
-    setChats((current) => current.map((chat) => chat.id === selectedChat.id
-      ? { ...chat, name: groupName.trim(), avatar: groupAvatar }
-      : chat));
-    setModal(null);
-    showToast("Info grup berhasil diperbarui.");
+    showToast("Perubahan info grup belum diizinkan oleh kebijakan database.");
   }
 
   function leaveGroup() {
     if (!selectedChat || selectedChat.kind !== "group") return;
-    const name = selectedChat.name;
-    setChats((current) => current.filter((chat) => chat.id !== selectedChat.id));
-    setSelectedId(null);
-    setDetailsOpen(false);
-    setMobileDetailsOpen(false);
-    showToast(`Kamu keluar dari grup ${name}.`);
+    showToast("Keluar dari grup belum diizinkan oleh kebijakan database.");
   }
 
-  function openConversation(person: Person) {
-    let chat = chats.find((item) => item.id === person.id);
-    if (!chat) {
-      chat = {
-        id: person.id,
-        kind: "personal",
-        name: person.name,
-        username: person.username,
-        avatar: person.avatar,
-        preview: "Mulai percakapan.",
-        time: "Baru saja",
-        unread: 0,
-        online: person.online,
-        bio: person.bio,
-        messages: [],
-      };
-      setChats((current) => [chat!, ...current]);
+  async function openConversation(person: Person) {
+    const result = await openDirectConversationAction(person.id);
+    if (!result.ok) {
+      showToast(result.error);
+      return;
     }
-    selectChat(chat.id);
+
+    const conversations = await loadConversationsAction();
+    if (!conversations.ok) {
+      showToast(conversations.error);
+      return;
+    }
+    setChats(conversations.data);
+    selectChat(result.data);
     setModal(null);
     setProfilePreview(null);
     setPeopleQuery("");
   }
 
-  function decideRequest(person: Person, accepted: boolean) {
-    setRequests((current) => current.filter((request) => request.id !== person.id));
-    if (accepted) setPeople((current) => [...current, person]);
-    showToast(accepted ? `${person.name} ditambahkan ke temanmu.` : "Permintaan ditolak.");
+  async function sendFriendRequest(person: Person) {
+    const result = await sendFriendRequestAction(person.id);
+    if (!result.ok) {
+      showToast(result.error);
+      return;
+    }
+
+    const snapshot = await refreshFriendships();
+    if (!snapshot) return;
+    showToast(`Permintaan pertemanan dikirim ke ${person.name}.`);
+  }
+
+  async function decideRequest(request: FriendRequest, accepted: boolean) {
+    const result = await respondFriendRequestAction(
+      request.friendshipId,
+      accepted ? "accepted" : "rejected",
+    );
+    if (!result.ok) {
+      showToast(result.error);
+      return;
+    }
+
+    const snapshot = await refreshFriendships();
+    if (!snapshot) return;
+    showToast(accepted ? `${request.person.name} ditambahkan ke temanmu.` : "Permintaan ditolak.");
+  }
+
+  function markNotificationsRead() {
+    setNotifications((current) => current.map((item) => ({ ...item, unread: false })));
+    showToast("Notifikasi pada sesi ini ditandai sudah dibaca.");
   }
 
   function toggleProfileEdit() {
@@ -249,43 +577,49 @@ export function AppShell() {
             <div className="people-grid">
               {people.filter((person) => !peopleQuery || person.name.toLowerCase().includes(peopleQuery.toLowerCase()) || person.username.toLowerCase().includes(peopleQuery.toLowerCase().replace("@", ""))).map((person) => (
                 <article className="person-card" key={person.id}>
-                  <div className="person-card-top"><Avatar src={person.avatar} name={person.name} size="lg" online={person.online} /><button className="icon-button"><ChevronDown size={17} /></button></div>
+                  <div className="person-card-top"><Avatar src={person.avatar} name={person.name} size="lg" online={person.online} /><button className="icon-button" onClick={() => setProfilePreview(person)} aria-label={`Lihat profil ${person.name}`}><ChevronDown size={17} /></button></div>
                   <strong>{person.name}</strong><span>@{person.username}</span>
                   <p>{person.bio ?? "Selalu siap untuk obrolan yang seru."}</p>
                   <div className="person-card-actions"><button className="secondary-button" onClick={() => openConversation(person)}><MessageCircle size={16} /> Pesan</button><button className="icon-button profile-action" onClick={() => setProfilePreview(person)} aria-label={`Lihat profil ${person.name}`}>↗</button></div>
                 </article>
               ))}
             </div>
-            {people.length === 0 && <EmptyPanel title="Belum ada teman" copy="Cari orang dan mulai percakapan baru." action="Cari orang" onAction={() => setModal("new-chat")} />}
+            {friendshipsLoading && <div className="search-empty">Memuat daftar teman...</div>}
+            {!friendshipsLoading && people.length === 0 && <EmptyPanel title="Belum ada teman" copy="Cari orang dan mulai percakapan baru." action="Cari orang" onAction={() => setModal("new-chat")} />}
+            {!friendshipsLoading && people.length > 0 && peopleQuery && !people.some((person) => person.name.toLowerCase().includes(peopleQuery.toLowerCase()) || person.username.toLowerCase().includes(peopleQuery.toLowerCase().replace("@", ""))) && <EmptyPanel title="Teman tidak ditemukan" copy="Coba nama atau username yang lain." />}
           </section>
         );
       case "requests":
         return (
           <section className="workspace-page">
             <div className="workspace-title-row"><div><span className="eyebrow">Koneksi baru</span><h1>Permintaan pertemanan</h1><p>Pilih siapa yang ingin kamu tambahkan.</p></div><span className="soft-count">{requests.length} baru</span></div>
-            <div className="request-tabs"><button className="active">Masuk <span>{requests.length}</span></button><button onClick={() => showToast("Belum ada permintaan terkirim.")}>Terkirim</button></div>
-            {requests.length ? <div className="request-list">{requests.map((person) => <article className="request-row" key={person.id}><Avatar src={person.avatar} name={person.name} online={person.online} /><div className="request-person"><strong>{person.name}</strong><span>@{person.username} · ingin terhubung denganmu</span></div><button className="icon-button request-reject" onClick={() => decideRequest(person, false)} aria-label="Tolak permintaan"><X size={17} /></button><button className="primary-button small-primary" onClick={() => decideRequest(person, true)}><Check size={16} /> Terima</button></article>)}</div> : <EmptyPanel title="Tidak ada permintaan baru" copy="Permintaan baru akan muncul di sini." />}
+            <div className="request-tabs">
+              <button className={requestTab === "incoming" ? "active" : ""} onClick={() => setRequestTab("incoming")}>Masuk <span>{requests.length}</span></button>
+              <button className={requestTab === "outgoing" ? "active" : ""} onClick={() => setRequestTab("outgoing")}>Terkirim <span>{outgoingRequests.length}</span></button>
+            </div>
+            {friendshipsLoading ? <div className="search-empty">Memuat permintaan...</div> : requestTab === "incoming" ? (
+              requests.length ? <div className="request-list">{requests.map((request) => <article className="request-row" key={request.friendshipId}><Avatar src={request.person.avatar} name={request.person.name} online={request.person.online} /><div className="request-person"><strong>{request.person.name}</strong><span>@{request.person.username} · ingin terhubung denganmu</span></div><button className="icon-button request-reject" onClick={() => void decideRequest(request, false)} aria-label={`Tolak permintaan dari ${request.person.name}`}><X size={17} /></button><button className="primary-button small-primary" onClick={() => void decideRequest(request, true)}><Check size={16} /> Terima</button></article>)}</div> : <EmptyPanel title="Tidak ada permintaan masuk" copy="Permintaan pertemanan baru akan muncul di sini." />
+            ) : outgoingRequests.length ? (
+              <div className="request-list">{outgoingRequests.map((request) => <article className="request-row" key={request.friendshipId}><Avatar src={request.person.avatar} name={request.person.name} online={request.person.online} /><div className="request-person"><strong>{request.person.name}</strong><span>@{request.person.username} · menunggu respons</span></div><span className="soft-count">Menunggu</span></article>)}</div>
+            ) : <EmptyPanel title="Tidak ada permintaan terkirim" copy="Permintaan yang kamu kirim akan muncul di sini." />}
           </section>
         );
       case "notifications":
         return (
           <section className="workspace-page">
-            <div className="workspace-title-row"><div><span className="eyebrow">Tetap terhubung</span><h1>Notifikasi</h1><p>Momen penting, semuanya di satu tempat.</p></div><button className="secondary-button" onClick={() => { setNotificationsRead(true); showToast("Semua notifikasi ditandai sudah dibaca."); }}><CheckCheck size={16} /> Tandai semua dibaca</button></div>
-            <div className="notification-list">
-              {[
-                { title: "Nara mengirim pesan", text: "Seru banget, sampai ketemu besok ya!", time: "2 menit lalu", initials: "N", color: "lavender" },
-                { title: "Maya menambahkanmu ke grup", text: "“Rencana Jumat” · 8 anggota", time: "1 jam lalu", initials: "M", color: "peach" },
-                { title: "Tiara mengirim permintaan pertemanan", text: "Koneksi baru · @tiara.r", time: "3 jam lalu", initials: "T", color: "mint" },
-                { title: "Percakapanmu dengan Bima masih aktif", text: "Lanjutkan obrolan terakhir kalian.", time: "Kemarin", initials: "B", color: "blue" },
-              ].map((item, index) => <article className={`notification-row${!notificationsRead && index < 2 ? " unread" : ""}`} key={item.title}><span className={`notification-avatar ${item.color}`}>{item.initials}</span><div><strong>{item.title}</strong><p>{item.text}</p><small>{item.time}</small></div>{!notificationsRead && index < 2 && <span className="notification-dot" />}</article>)}
-            </div>
+            <div className="workspace-title-row"><div><span className="eyebrow">Tetap terhubung</span><h1>Notifikasi</h1><p>Aktivitas pesan dan pertemanan terbaru.</p></div><button className="secondary-button" onClick={markNotificationsRead} disabled={!notifications.some((item) => item.unread)}><Check size={16} /> Tandai dibaca</button></div>
+            {notifications.length ? (
+              <div className="notification-list">
+                {notifications.map((item) => <article className={`notification-row${item.unread ? " unread" : ""}`} key={item.id}><span className={`notification-avatar ${item.color}`}>{item.initials}</span><div><strong>{item.title}</strong><p>{item.text}</p><small>{new Intl.DateTimeFormat("id-ID", { dateStyle: "medium", timeStyle: "short" }).format(new Date(item.createdAt))}</small></div>{item.unread && <span className="notification-dot" />}</article>)}
+              </div>
+            ) : <EmptyPanel title="Belum ada aktivitas baru" copy="Pesan masuk dan perubahan pertemanan akan tampil di sini selama halaman ini terbuka. Riwayat dan status baca permanen memerlukan penyimpanan notifikasi di database." />}
           </section>
         );
       case "profile":
         return (
           <section className="workspace-page profile-page">
             <div className="workspace-title-row"><div><span className="eyebrow">Tentang dirimu</span><h1>Profil saya</h1><p>Hal-hal yang temanmu lihat tentangmu.</p></div><button className="primary-button" onClick={toggleProfileEdit}><Settings size={16} /> {profileEdit ? "Simpan" : "Edit profil"}</button></div>
-            <article className="profile-card"><div className="profile-cover"><span className="cover-orb orb-one" /><span className="cover-orb orb-two" /></div><div className="profile-card-body"><Avatar src={currentUser.avatar} name={profileName} size="xl" online /><div className="profile-name-block"><h2>{profileName}</h2><span>@{profileUsername}</span></div><p>{profileBio}</p><div className="profile-stat-row"><div><strong>{people.length}</strong><span>Teman</span></div><div><strong>{chats.length}</strong><span>Percakapan</span></div><div><strong>2024</strong><span>Bergabung</span></div></div>{profileEdit && <div className="profile-edit-form"><label>Nama<input value={profileName} onChange={(event) => setProfileName(event.target.value)} /></label><label>Username<input value={profileUsername} onChange={(event) => setProfileUsername(event.target.value)} /></label><label>Bio singkat<input value={profileBio} onChange={(event) => setProfileBio(event.target.value)} /></label></div>}</div></article>
+            <article className="profile-card"><div className="profile-cover"><span className="cover-orb orb-one" /><span className="cover-orb orb-two" /></div><div className="profile-card-body"><Avatar src={signedInUser.avatar} name={profileName} size="xl" online /><div className="profile-name-block"><h2>{profileName}</h2><span>@{profileUsername}</span></div><p>{profileBio}</p><div className="profile-stat-row"><div><strong>{people.length}</strong><span>Teman</span></div><div><strong>{chats.length}</strong><span>Percakapan</span></div><div><strong>2024</strong><span>Bergabung</span></div></div>{profileEdit && <div className="profile-edit-form"><label>Nama<input value={profileName} onChange={(event) => setProfileName(event.target.value)} /></label><label>Username<input value={profileUsername} onChange={(event) => setProfileUsername(event.target.value)} /></label><label>Bio singkat<input value={profileBio} onChange={(event) => setProfileBio(event.target.value)} /></label></div>}</div></article>
           </section>
         );
       case "settings":
@@ -304,7 +638,7 @@ export function AppShell() {
             <button key={id} className={`rail-button${section === id ? " active" : ""}`} onClick={() => setSection(id)} aria-label={label} title={label}>
               <Icon size={20} strokeWidth={1.8} />
               {id === "requests" && requests.length > 0 && <span className="rail-badge">{requests.length}</span>}
-              {id === "notifications" && !notificationsRead && <span className="rail-notification-dot" />}
+              {id === "notifications" && notifications.some((item) => item.unread) && <span className="rail-notification-dot" />}
               <span className="rail-tooltip">{label}</span>
             </button>
           ))}
@@ -312,7 +646,7 @@ export function AppShell() {
         </div>
         <div className="rail-bottom">
           <button className={`rail-button${section === "settings" ? " active" : ""}`} onClick={() => setSection("settings")} aria-label="Pengaturan" title="Pengaturan"><Settings size={19} /><span className="rail-tooltip">Pengaturan</span></button>
-          <button className={`rail-avatar${section === "profile" ? " active" : ""}`} onClick={() => setSection("profile")} aria-label="Profil saya"><Avatar src={currentUser.avatar} name={currentUser.name} size="sm" online /></button>
+          <button className={`rail-avatar${section === "profile" ? " active" : ""}`} onClick={() => setSection("profile")} aria-label="Profil saya"><Avatar src={signedInUser.avatar} name={signedInUser.name} size="sm" online /></button>
           <span className="rail-user-status"><span /></span>
         </div>
       </nav>
@@ -323,11 +657,12 @@ export function AppShell() {
           {selectedChat ? (
             <ConversationView
               conversation={selectedChat}
+              loading={Boolean(selectedId && loadedConversationId !== selectedId)}
               onToggleDetails={toggleDetails}
               onBack={() => setSelectedId(null)}
               onSend={sendMessage}
-              onDelete={(messageId) => updateChatMessages(selectedChat.id, (messages) => messages.filter((message) => message.id !== messageId))}
-              onEdit={(messageId, text) => updateChatMessages(selectedChat.id, (messages) => messages.map((message) => message.id === messageId ? { ...message, text } : message))}
+              onDelete={() => showToast("Penghapusan pesan belum diizinkan oleh kebijakan database.")}
+              onEdit={editMessage}
             />
           ) : <WelcomeEmpty onCreate={() => setModal("new-chat")} />}
           {detailsOpen && selectedChat && <InfoPanel conversation={selectedChat} onClose={closeDetails} onAction={showToast} onAddMembers={() => { setGroupMembers([]); setModal("add-members"); }} onEditGroup={openGroupEditor} onLeaveGroup={leaveGroup} />}
@@ -339,9 +674,9 @@ export function AppShell() {
             <div className="section-side-label">RUANG KERJA</div>
             {navigation.map(({ id, label, icon: Icon }) => <button key={id} className={`section-nav-item${section === id ? " active" : ""}`} onClick={() => setSection(id)}><Icon size={17} />{label}{id === "requests" && requests.length > 0 && <span>{requests.length}</span>}</button>)}
             <div className="section-side-label section-side-label-spaced">PRIBADI</div>
-            <button className={`section-nav-item${section === "profile" ? " active" : ""}`} onClick={() => setSection("profile")}><Avatar src={currentUser.avatar} name={currentUser.name} size="sm" />Profil saya</button>
+            <button className={`section-nav-item${section === "profile" ? " active" : ""}`} onClick={() => setSection("profile")}><Avatar src={signedInUser.avatar} name={signedInUser.name} size="sm" />Profil saya</button>
             <button className={`section-nav-item${section === "settings" ? " active" : ""}`} onClick={() => setSection("settings")}><Settings size={17} />Pengaturan</button>
-            <div className="section-sidebar-bottom"><Avatar src={currentUser.avatar} name={currentUser.name} size="sm" online /><div><strong>{currentUser.name}</strong><span>Aktif</span></div><button className="icon-button" aria-label="Opsi akun"><ChevronDown size={16} /></button></div>
+            <div className="section-sidebar-bottom"><Avatar src={signedInUser.avatar} name={signedInUser.name} size="sm" online /><div><strong>{signedInUser.name}</strong><span>Aktif</span></div><button className="icon-button" aria-label="Opsi akun"><ChevronDown size={16} /></button></div>
           </aside>
           <div className="section-content">{renderSection()}</div>
         </div>
@@ -353,26 +688,51 @@ export function AppShell() {
             <div className="modal-heading"><div><span className="eyebrow">{modal === "group" || modal === "add-members" || modal === "edit-group" ? "Lebih seru bersama" : "Koneksi baru"}</span><h2 id="modal-title">{modal === "group" ? "Buat grup" : modal === "edit-group" ? "Edit grup" : modal === "add-members" ? "Tambah anggota" : "Cari orang"}</h2></div><button className="icon-button" onClick={() => setModal(null)} aria-label="Tutup"><X size={18} /></button></div>
             {modal === "group" || modal === "add-members" || modal === "edit-group" ? (
               <form className="modal-form" onSubmit={modal === "group" ? createGroup : modal === "edit-group" ? saveGroupEdits : addMembersToChat}>
-                {modal !== "add-members" && <label className="group-photo-picker">
-                  <input type="file" accept="image/*" onChange={(event) => {
-                    const file = event.target.files?.[0];
-                    if (file) setGroupAvatar(URL.createObjectURL(file));
-                  }} />
-                  {groupAvatar ? <Avatar src={groupAvatar} name={groupName || "Grup"} size="lg" group /> : <span className="group-photo-placeholder"><Plus size={19} /></span>}
-                  <span><strong>Foto grup</strong><small>Tambahkan gambar jika mau</small></span>
-                  <span className="secondary-button group-photo-action">{groupAvatar ? "Ganti" : "Unggah"}</span>
-                </label>}
+                {modal !== "add-members" && <p className="modal-description">Foto grup dapat ditambahkan setelah Storage disiapkan.</p>}
                 {modal !== "add-members" && <label>Nama grup<input value={groupName} onChange={(event) => setGroupName(event.target.value)} placeholder="Contoh: Klub kecil kita" autoFocus required /></label>}
-                {modal === "add-members" && <p className="modal-description">Pilih teman yang ingin ditambahkan ke grup ini.</p>}
-                {modal === "group" && <label>Tambahkan teman <span className="optional-label">Bisa ditambahkan nanti</span></label>}
-                {modal !== "edit-group" && <div className="member-picker">{people.map((person) => <button type="button" className={`member-option${groupMembers.includes(person.id) ? " selected" : ""}`} key={person.id} onClick={() => setGroupMembers((current) => current.includes(person.id) ? current.filter((id) => id !== person.id) : [...current, person.id])}><Avatar src={person.avatar} name={person.name} size="sm" /><span>{person.name}</span>{groupMembers.includes(person.id) && <Check size={15} />}</button>)}</div>}
-                <div className="modal-footer"><span>{modal === "group" || modal === "add-members" ? `${groupMembers.length} teman dipilih` : "Perubahan hanya terlihat di demo ini"}</span><button type="submit" className="primary-button" disabled={modal === "add-members" ? groupMembers.length === 0 : !groupName.trim()}>{modal === "group" ? <><UsersRound size={16} /> Buat grup</> : modal === "add-members" ? <><UserPlus size={16} /> Tambahkan</> : "Simpan perubahan"}</button></div>
+                {modal !== "edit-group" && (
+                  <>
+                    <label className="search-field"><Search size={16} /><input value={peopleQuery} onChange={(event) => setPeopleQuery(event.target.value)} placeholder="Cari anggota berdasarkan username" /></label>
+                    <div className="member-picker">
+                      {currentSearchResults.map((person) => (
+                        <button
+                          type="button"
+                          className={`member-option${groupMembers.includes(person.id) ? " selected" : ""}`}
+                          key={person.id}
+                          onClick={() => setGroupMembers((current) =>
+                            current.includes(person.id)
+                              ? current.filter((id) => id !== person.id)
+                              : [...current, person.id],
+                          )}
+                        >
+                          <Avatar src={person.avatar} name={person.name} size="sm" />
+                          <span>{person.name}<small>@{person.username}</small></span>
+                          {groupMembers.includes(person.id) && <Check size={15} />}
+                        </button>
+                      ))}
+                      {searchingUsers && <div className="search-empty">Mencari pengguna...</div>}
+                    </div>
+                  </>
+                )}
+                <div className="modal-footer"><span>{modal === "group" || modal === "add-members" ? `${groupMembers.length} anggota dipilih` : "Perubahan grup belum tersedia"}</span><button type="submit" className="primary-button" disabled={modal === "add-members" ? groupMembers.length === 0 : !groupName.trim()}>{modal === "group" ? <><UsersRound size={16} /> Buat grup</> : modal === "add-members" ? <><UserPlus size={16} /> Tambahkan</> : "Simpan perubahan"}</button></div>
               </form>
             ) : (
               <div className="modal-form">
-                <label className="search-field"><Search size={16} /><input value={peopleQuery} onChange={(event) => setPeopleQuery(event.target.value)} placeholder="Nama atau @username" autoFocus /></label>
-                <div className="member-picker search-results">{searchedPeople.map((person) => <button className="member-option" key={person.id} onClick={() => openConversation(person)}><Avatar src={person.avatar} name={person.name} size="sm" online={person.online} /><span>{person.name}<small>@{person.username}</small></span><MessageCircle size={16} /></button>)}</div>
-                {searchedPeople.length === 0 && <div className="search-empty">Tidak ada pengguna dengan nama tersebut.</div>}
+                <label className="search-field"><Search size={16} /><input value={peopleQuery} onChange={(event) => setPeopleQuery(event.target.value)} placeholder="Cari berdasarkan username" autoFocus /></label>
+                <div className="member-picker search-results">{currentSearchResults.map((person) => {
+                  const isFriend = people.some((friend) => friend.id === person.id);
+                  const isIncoming = requests.some((request) => request.person.id === person.id);
+                  const isOutgoing = outgoingRequests.some((request) => request.person.id === person.id);
+                  return (
+                    <div className="search-result-row" key={person.id}>
+                      <button className="member-option" onClick={() => void openConversation(person)}><Avatar src={person.avatar} name={person.name} size="sm" online={person.online} /><span>{person.name}<small>@{person.username}</small></span><MessageCircle size={16} /></button>
+                      {isFriend ? <span className="search-result-status">Teman</span> : isIncoming ? <span className="search-result-status">Permintaan masuk</span> : isOutgoing ? <span className="search-result-status">Menunggu</span> : <button className="icon-button search-result-add" onClick={() => void sendFriendRequest(person)} aria-label={`Kirim permintaan pertemanan ke ${person.name}`}><UserPlus size={16} /></button>}
+                    </div>
+                  );
+                })}</div>
+                {searchingUsers && <div className="search-empty">Mencari pengguna...</div>}
+                {!searchingUsers && peopleQuery.trim().length >= 2 && currentSearchResults.length === 0 && <div className="search-empty">Tidak ada pengguna dengan username tersebut.</div>}
+                {peopleQuery.trim().length < 2 && <div className="search-empty">Ketik minimal 2 karakter username untuk mencari.</div>}
                 <div className="search-privacy-note">Kamu bisa memulai obrolan personal tanpa mengirim permintaan pertemanan.</div>
               </div>
             )}
@@ -394,7 +754,7 @@ export function AppShell() {
         </div>
       )}
       {toast && <div className="toast-message"><Check size={16} />{toast}<button onClick={() => setToast("")} aria-label="Tutup notifikasi"><X size={14} /></button></div>}
-      <button className="logout-link" onClick={() => router.push("/login")} title="Keluar"><LogOut size={15} /></button>
+      <button className="logout-link" onClick={() => void signOut()} title="Keluar"><LogOut size={15} /></button>
     </div>
   );
 }

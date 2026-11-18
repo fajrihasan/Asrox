@@ -139,10 +139,10 @@ export function ChatList({
         ))}
         {visibleChats.length === 0 && (
           <div className="list-empty">
-            <Search size={20} />
-            <strong>Tidak ditemukan</strong>
-            <span>Coba nama atau kata lain.</span>
-            <button onClick={onSearchPeople}>Cari orang</button>
+            {chats.length === 0 ? <UsersRound size={20} /> : <Search size={20} />}
+            <strong>{chats.length === 0 ? "Belum ada percakapan" : "Tidak ditemukan"}</strong>
+            <span>{chats.length === 0 ? "Mulai chat baru atau tunggu pesan masuk." : "Coba nama atau kata lain."}</span>
+            <button onClick={onSearchPeople}>{chats.length === 0 ? "Cari pengguna" : "Cari orang"}</button>
           </div>
         )}
         <button className="archived-link" onClick={onSearchPeople}>

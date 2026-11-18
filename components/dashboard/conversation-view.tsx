@@ -5,7 +5,6 @@ import {
   Check,
   CheckCheck,
   ChevronLeft,
-  ImagePlus,
   Info,
   MessageCircle,
   MoreHorizontal,
@@ -17,21 +16,23 @@ import {
   Video,
   X,
 } from "lucide-react";
-import { useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
+import { useMemo, useState, type FormEvent, type KeyboardEvent } from "react";
 import type { ChatConversation } from "@/lib/chat-types";
 import { Avatar } from "@/components/ui/avatar";
 
 interface ConversationViewProps {
   conversation: ChatConversation;
+  loading?: boolean;
   onToggleDetails: () => void;
   onBack: () => void;
-  onSend: (text: string) => void;
+  onSend: (text: string) => Promise<boolean>;
   onDelete: (messageId: string) => void;
-  onEdit: (messageId: string, text: string) => void;
+  onEdit: (messageId: string, text: string) => Promise<boolean>;
 }
 
 export function ConversationView({
   conversation,
+  loading = false,
   onToggleDetails,
   onBack,
   onSend,
@@ -42,29 +43,26 @@ export function ConversationView({
   const [searchOpen, setSearchOpen] = useState(false);
   const [messageSearch, setMessageSearch] = useState("");
   const [editing, setEditing] = useState<string | null>(null);
-  const [attachmentName, setAttachmentName] = useState("");
   const [showEmoji, setShowEmoji] = useState(false);
-  const [notice, setNotice] = useState("");
-  const fileInput = useRef<HTMLInputElement>(null);
 
   const filteredMessages = useMemo(() => {
     const query = messageSearch.trim().toLocaleLowerCase();
     return conversation.messages.filter((message) => message.text.toLocaleLowerCase().includes(query));
   }, [conversation.messages, messageSearch]);
 
-  function submitMessage(event: FormEvent<HTMLFormElement>) {
+  async function submitMessage(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const text = draft.trim();
-    if (!text && !attachmentName) return;
-    const message = [text, attachmentName && `📎 ${attachmentName}`].filter(Boolean).join(" · ");
+    if (!text) return;
+    const saved = editing
+      ? await onEdit(editing, text)
+      : await onSend(text);
+    if (!saved) return;
+
     if (editing) {
-      onEdit(editing, message);
       setEditing(null);
-    } else {
-      onSend(message);
     }
     setDraft("");
-    setAttachmentName("");
     setShowEmoji(false);
   }
 
@@ -73,13 +71,6 @@ export function ConversationView({
       event.preventDefault();
       event.currentTarget.form?.requestSubmit();
     }
-  }
-
-  function chooseFile(file?: File) {
-    if (!file) return;
-    setAttachmentName(file.name);
-    setNotice(`"${file.name}" dilampirkan ke pesan.`);
-    window.setTimeout(() => setNotice(""), 3000);
   }
 
   return (
@@ -96,10 +87,12 @@ export function ConversationView({
           <strong>{conversation.name}</strong>
           <span>
             {conversation.kind === "group"
-              ? `${conversation.members ?? 0} anggota · aktif`
-              : conversation.online
-                ? "Sedang online"
-                : "Terakhir dilihat hari ini"}
+              ? `${conversation.members ?? 0} anggota`
+              : conversation.online === undefined
+                ? "Status online belum tersedia"
+                : conversation.online
+                  ? "Sedang online"
+                  : "Offline"}
           </span>
         </button>
         <div className="header-actions">
@@ -150,7 +143,7 @@ export function ConversationView({
       )}
 
       <div className="message-feed" aria-live="polite">
-        <div className="date-divider"><span>Hari ini, 16 November</span></div>
+        {loading && <div className="message-no-results">Memuat riwayat pesan...</div>}
         {filteredMessages.map((message, index) => {
           const previous = filteredMessages[index - 1];
           const showAuthor = conversation.kind === "group" && (!previous || previous.author !== message.author);
@@ -192,23 +185,12 @@ export function ConversationView({
             </div>
           );
         })}
-        {filteredMessages.length === 0 && (messageSearch.trim()
+        {!loading && filteredMessages.length === 0 && (messageSearch.trim()
           ? <div className="message-no-results">Tidak ada pesan yang cocok dengan kata ini.</div>
           : <div className="conversation-empty"><span><MessageCircle size={21} /></span><strong>Belum ada pesan di sini</strong><p>Sapa duluan untuk memulai obrolan.</p></div>)}
-        {conversation.kind === "personal" && conversation.id === "nara" && (
-          <div className="typing-indicator"><span /><span /><span /> Nara sedang mengetik</div>
-        )}
       </div>
 
       <div className="composer-wrap">
-        {notice &&         <div className="composer-notice">{notice}</div>}
-        {attachmentName && (
-          <div className="attachment-chip">
-            <ImagePlus size={14} />
-            {attachmentName}
-            <button onClick={() => setAttachmentName("")} aria-label="Hapus lampiran"><X size={14} /></button>
-          </div>
-        )}
         {editing && (
           <div className="editing-hint">
             <span>Mengedit pesan</span>
@@ -223,13 +205,7 @@ export function ConversationView({
           </div>
         )}
         <form className="message-composer" onSubmit={submitMessage}>
-          <input
-            ref={fileInput}
-            type="file"
-            className="visually-hidden"
-            onChange={(event) => chooseFile(event.target.files?.[0])}
-          />
-          <button type="button" className="icon-button composer-tool" onClick={() => fileInput.current?.click()} aria-label="Lampirkan file">
+          <button type="button" className="icon-button composer-tool" aria-label="Lampiran belum tersedia" title="Lampiran belum terhubung ke Storage" disabled>
             <Paperclip size={19} />
           </button>
           <textarea
@@ -244,7 +220,7 @@ export function ConversationView({
             <button type="button" className={`icon-button composer-tool${showEmoji ? " selected" : ""}`} onClick={() => setShowEmoji((value) => !value)} aria-label="Tambahkan emoji">
               <Smile size={19} />
             </button>
-            <button type="submit" className="send-button" disabled={!draft.trim() && !attachmentName} aria-label="Kirim pesan">
+            <button type="submit" className="send-button" disabled={!draft.trim()} aria-label="Kirim pesan">
               <Send size={17} />
             </button>
           </div>

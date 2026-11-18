@@ -20,6 +20,7 @@ export interface ChatMessage {
 
 export interface ChatConversation {
   id: string;
+  peerId?: string;
   kind: ChatKind;
   name: string;
   username?: string;
@@ -31,6 +32,7 @@ export interface ChatConversation {
   members?: number;
   currentUserRole?: GroupRole;
   bio?: string;
+  participants?: ChatParticipant[];
   messages: ChatMessage[];
 }
 
@@ -39,6 +41,10 @@ export interface Person {
   name: string;
   username: string;
   avatar: string;
-  online: boolean;
+  online?: boolean;
   bio?: string;
+}
+
+export interface ChatParticipant extends Person {
+  role: GroupRole;
 }

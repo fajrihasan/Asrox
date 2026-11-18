@@ -3,8 +3,6 @@
 import {
   Bell,
   ChevronRight,
-  FileText,
-  Image as ImageIcon,
   Link2,
   LogOut,
   MoreHorizontal,
@@ -43,8 +41,12 @@ export function InfoPanel({ conversation, onClose, onAction, onAddMembers, onEdi
         <h2>{conversation.name}</h2>
         <p>{conversation.kind === "group" ? `${conversation.members ?? 0} anggota` : `@${conversation.username ?? "teman"}`}</p>
         <div className="profile-status">
-          <span className={`status-dot${conversation.online ? "" : " offline"}`} />
-          {conversation.online ? "Sedang online" : "Offline"}
+          {conversation.online !== undefined && <span className={`status-dot${conversation.online ? "" : " offline"}`} />}
+          {conversation.online === undefined
+            ? "Status online belum tersedia"
+            : conversation.online
+              ? "Sedang online"
+              : "Offline"}
         </div>
         <p className="profile-bio">{conversation.bio ?? "Menciptakan kenangan baik bersama."}</p>
         <div className="profile-actions">
@@ -60,20 +62,18 @@ export function InfoPanel({ conversation, onClose, onAction, onAddMembers, onEdi
         </div>
         {conversation.kind === "group" ? (
           <div className="member-list">
-            {[conversation.name.split(" ")[0], "Maya", "Sonia", "Bima"].map((name, index) => (
-              <div className="member-row" key={`${name}-${index}`}>
-                <Avatar name={name} size="sm" online={index < 2} />
-                <div><strong>{name}</strong><span>{index === 0 ? "Pemilik" : index === 1 ? "Admin" : "Anggota"}</span></div>
-                <button aria-label={`Opsi untuk ${name}`} onClick={() => onAction(`Opsi anggota ${name}`)}><MoreHorizontal size={16} /></button>
+            {conversation.participants?.map((member) => (
+              <div className="member-row" key={member.id}>
+                <Avatar src={member.avatar} name={member.name} size="sm" online={member.online} />
+                <div><strong>{member.name}</strong><span>{member.role === "owner" ? "Pemilik" : member.role === "admin" ? "Admin" : "Anggota"}</span></div>
+                <button aria-label={`Opsi untuk ${member.name}`} onClick={() => onAction(`Pengelolaan anggota belum tersedia.`)}><MoreHorizontal size={16} /></button>
               </div>
             ))}
+            {!conversation.participants?.length && <p>Daftar anggota belum tersedia.</p>}
             {canManageGroup && <button className="add-member" onClick={onAddMembers}><UsersRound size={15} /> Tambah anggota</button>}
           </div>
         ) : (
-          <div className="shared-grid">
-            <div className="shared-item"><span><ImageIcon size={18} /></span><strong>Foto</strong><small>12 item</small></div>
-            <div className="shared-item"><span><FileText size={18} /></span><strong>File</strong><small>3 item</small></div>
-          </div>
+          <div className="shared-grid">Belum ada media yang dibagikan.</div>
         )}
       </div>
 

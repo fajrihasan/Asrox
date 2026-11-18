@@ -2,50 +2,57 @@
 
 import { ArrowLeft, ArrowRight, Check, Eye, EyeOff, KeyRound, Mail } from "lucide-react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
-import { useState, type FormEvent } from "react";
+import { useActionState, useState } from "react";
 import { BrandMark } from "@/components/brand-mark";
+import {
+  forgotPasswordAction,
+  loginAction,
+  registerAction,
+  resendConfirmationAction,
+  resetPasswordAction,
+  type AuthActionState,
+} from "@/app/actions/auth";
 
-type AuthMode = "login" | "register" | "forgot" | "confirm";
+type AuthMode = "login" | "register" | "forgot" | "confirm" | "reset";
 
-export function AuthForm({ mode, emailAddress }: { mode: AuthMode; emailAddress?: string }) {
-  const router = useRouter();
+const emptyState: AuthActionState = {};
+
+export function AuthForm({
+  mode,
+  emailAddress,
+  initialError,
+  initialSuccess,
+}: {
+  mode: AuthMode;
+  emailAddress?: string;
+  initialError?: string;
+  initialSuccess?: string;
+}) {
   const [showPassword, setShowPassword] = useState(false);
-  const [error, setError] = useState("");
-  const [success, setSuccess] = useState("");
-  const [loading, setLoading] = useState(false);
-
-  function submit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    setError("");
-    setSuccess("");
-    setLoading(true);
-    const formData = new FormData(event.currentTarget);
-    const password = String(formData.get("password") ?? "");
-    const confirmPassword = String(formData.get("confirmPassword") ?? "");
-
-    if (mode === "register" && password !== confirmPassword) {
-      setLoading(false);
-      setError("Kata sandi tidak cocok. Periksa kembali lalu coba lagi.");
-      return;
-    }
-
-    window.setTimeout(() => {
-      setLoading(false);
-      if (mode === "login") router.push("/");
-      if (mode === "register") {
-        const address = String(formData.get("email") ?? "");
-        router.push(`/confirm-email?email=${encodeURIComponent(address)}`);
-      }
-      if (mode === "forgot") setSuccess("Tautan pemulihan dikirim ke email-mu.");
-    }, 450);
-  }
+  const action =
+    mode === "login"
+      ? loginAction
+      : mode === "register"
+        ? registerAction
+        : mode === "reset"
+          ? resetPasswordAction
+          : forgotPasswordAction;
+  const [state, formAction, pending] = useActionState(action, {
+    ...emptyState,
+    error: initialError,
+    success: initialSuccess,
+  });
+  const [resendState, resendAction, resending] = useActionState(
+    resendConfirmationAction,
+    emptyState,
+  );
 
   const headings: Record<AuthMode, { title: string; copy: string }> = {
     login: { title: "Senang bertemu lagi.", copy: "Masuk dan lanjutkan percakapanmu." },
     register: { title: "Buat ruang untukmu.", copy: "Bergabunglah dengan Koneksi dan tetap dekat dengan orang-orangmu." },
     forgot: { title: "Lupa kata sandi?", copy: "Tidak masalah. Kami akan mengirim tautan pemulihan ke email-mu." },
     confirm: { title: "Periksa email-mu.", copy: "Kami mengirim email konfirmasi untuk menyelesaikan pendaftaran." },
+    reset: { title: "Buat kata sandi baru.", copy: "Pilih kata sandi baru untuk mengamankan akunmu." },
   };
   const heading = headings[mode];
 
@@ -62,8 +69,14 @@ export function AuthForm({ mode, emailAddress }: { mode: AuthMode; emailAddress?
               <h1>{heading.title}</h1>
               <p>{heading.copy}</p>
               <div className="confirmation-email">{emailAddress || "alamat email yang kamu daftarkan"}</div>
-              {success && <div className="auth-success"><Check size={15} />{success}</div>}
-              <button className="primary-button auth-submit" onClick={() => setSuccess("Email konfirmasi dikirim ulang.")}>Kirim ulang email <ArrowRight size={17} /></button>
+              {resendState.error && <div className="auth-error" role="alert">{resendState.error}</div>}
+              {resendState.success && <div className="auth-success" role="status"><Check size={15} />{resendState.success}</div>}
+              <form action={resendAction}>
+                <input type="hidden" name="email" value={emailAddress ?? ""} />
+                <button className="primary-button auth-submit" type="submit" disabled={resending}>
+                  {resending ? <span className="loading-spinner" /> : "Kirim ulang email"} <ArrowRight size={17} />
+                </button>
+              </form>
               <Link className="auth-back-link" href="/login"><ArrowLeft size={15} /> Kembali ke halaman masuk</Link>
               <span className="confirmation-hint">Tidak menemukan email-nya? Periksa folder spam.</span>
             </div>
@@ -72,23 +85,31 @@ export function AuthForm({ mode, emailAddress }: { mode: AuthMode; emailAddress?
               <span className="eyebrow">{mode === "login" ? "Orang-orangmu menunggu" : mode === "register" ? "Tetap dekat, lebih mudah" : "Langkah pertama keamanan akun"}</span>
               <h1>{heading.title}</h1>
               <p className="auth-intro">{heading.copy}</p>
-              <form className="auth-form" onSubmit={submit}>
-                {mode === "register" && <label>Username<input name="username" placeholder="Contoh: anisa.m" required minLength={3} autoComplete="username" /></label>}
-                <label>{mode === "login" ? "Email atau username" : "Email"}<input name="email" type={mode === "login" ? "text" : "email"} placeholder={mode === "login" ? "email atau username" : "nama@contoh.com"} required autoComplete={mode === "login" ? "username" : "email"} /></label>
-                {(mode === "login" || mode === "register") && (
+              <form className="auth-form" action={formAction}>
+                {mode === "register" && (
+                  <>
+                    <label>Nama tampilan<input name="fullName" placeholder="Nama yang ingin ditampilkan" required minLength={2} maxLength={80} autoComplete="name" /></label>
+                    <label>Username<input name="username" placeholder="Contoh: anisa_m" required minLength={3} maxLength={24} pattern="[a-z0-9_]+" autoComplete="username" /></label>
+                  </>
+                )}
+                {mode !== "reset" && <label>Email<input name="email" type="email" placeholder="nama@contoh.com" required autoComplete="email" /></label>}
+                {(mode === "login" || mode === "register" || mode === "reset") && (
                   <label>
                     <span className="label-row">Kata sandi{mode === "login" && <Link href="/forgot-password">Lupa kata sandi?</Link>}</span>
                     <span className="password-field"><input name="password" type={showPassword ? "text" : "password"} placeholder="Minimal 8 karakter" required minLength={8} autoComplete={mode === "login" ? "current-password" : "new-password"} /><button type="button" onClick={() => setShowPassword((value) => !value)} aria-label={showPassword ? "Sembunyikan kata sandi" : "Tampilkan kata sandi"}>{showPassword ? <EyeOff size={17} /> : <Eye size={17} />}</button></span>
                   </label>
                 )}
-                {mode === "register" && <label>Konfirmasi kata sandi<input name="confirmPassword" type={showPassword ? "text" : "password"} placeholder="Ketik ulang kata sandi" required minLength={8} autoComplete="new-password" /></label>}
+                {(mode === "register" || mode === "reset") && <label>Konfirmasi kata sandi<input name="confirmPassword" type={showPassword ? "text" : "password"} placeholder="Ketik ulang kata sandi" required minLength={8} autoComplete="new-password" /></label>}
                 {mode === "login" && <label className="remember-option"><input type="checkbox" name="remember" /> Ingat saya di perangkat ini</label>}
-                {error && <div className="auth-error" role="alert">{error}</div>}
-                {success && <div className="auth-success" role="status"><Check size={15} />{success}</div>}
-                <button className="primary-button auth-submit" type="submit" disabled={loading}>{loading ? <span className="loading-spinner" /> : mode === "login" ? "Masuk" : mode === "register" ? "Buat akun" : "Kirim tautan"}<ArrowRight size={17} /></button>
+                {state.error && <div className="auth-error" role="alert">{state.error}</div>}
+                {state.success && <div className="auth-success" role="status"><Check size={15} />{state.success}</div>}
+                <button className="primary-button auth-submit" type="submit" disabled={pending}>
+                  {pending ? <span className="loading-spinner" /> : mode === "login" ? "Masuk" : mode === "register" ? "Buat akun" : mode === "reset" ? "Simpan kata sandi" : "Kirim tautan"}
+                  <ArrowRight size={17} />
+                </button>
               </form>
               {mode === "login" ? <p className="auth-switch">Belum punya akun? <Link href="/register">Daftar</Link></p> : mode === "register" ? <p className="auth-switch">Sudah punya akun? <Link href="/login">Masuk</Link></p> : <Link className="auth-back-link" href="/login"><ArrowLeft size={15} /> Kembali ke halaman masuk</Link>}
-              {(mode === "login" || mode === "register") && <p className="auth-demo-note">Mode prototipe · autentikasi disimulasikan</p>}
+              {(mode === "login" || mode === "register") && <p className="auth-demo-note">Autentikasi aman oleh Supabase</p>}
             </>
           )}
         </div>
